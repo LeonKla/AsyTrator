@@ -6,15 +6,17 @@ client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
 def dub_video(input_path, source_lang, target_lang, output_path):
     """
-    Sends a local video to ElevenLabs and returns the path
-    to the finished dubbed video.
+    Sends a local video to ElevenLabs dubbing API and saves the result.
+    ElevenLabs handles transcription, translation, and voice synthesis automatically.
+    source_lang / target_lang: ISO 639-1 codes, e.g. "de", "en", "es"
     """
     print(f"Uploading {input_path}...")
     with open(input_path, "rb") as f:
-        response = client.dubbing.dub_a_video_or_an_audio_file(
+        response = client.dubbing.create(
             file=(os.path.basename(input_path), f, "video/mp4"),
-            source_lang=source_lang,   # e.g. "de"
-            target_lang=target_lang,   # e.g. "en"
+            source_lang=source_lang,
+            target_lang=target_lang,
+            watermark=True,
         )
 
     dubbing_id = response.dubbing_id
@@ -23,7 +25,7 @@ def dub_video(input_path, source_lang, target_lang, output_path):
     # Poll until finished
     print("Waiting for ElevenLabs...")
     for _ in range(120):  # max 20 minutes
-        metadata = client.dubbing.get_dubbing_project_metadata(dubbing_id)
+        metadata = client.dubbing.get(dubbing_id)
         if metadata.status == "dubbed":
             print("Done!")
             break
@@ -38,21 +40,6 @@ def dub_video(input_path, source_lang, target_lang, output_path):
     with open(output_path, "wb") as f:
         for chunk in audio:
             f.write(chunk)
+
     print(f"Saved: {output_path}")
     return output_path
-
-
-# HeyGen API Call for dubbing with lipsync (kept for reference):
-#
-# curl --request POST \
-#      --url https://api.heygen.com/v2/video_translate \
-#      --header 'accept: application/json' \
-#      --header 'content-type: application/json' \
-#      --header 'x-api-key: <your-api-key>' \
-#      --data '
-# {
-#   "translate_audio_only": false,
-#   "keep_the_same_format": false,
-#   "mode": "fast"
-# }
-# '

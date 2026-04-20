@@ -1,20 +1,39 @@
+import sys
+import io
 import cv2
 import pyvirtualcam
 import threading
 from collections import deque
 from dotenv import load_dotenv
-from dubbing import dub_video  # your dubbing.py
+from dubbing import dub_video
+
+# Fix for Python 3.14 + Windows terminal unicode bug
+sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
 
 load_dotenv()
 
+# --- Constants ---
+FPS = 30
+WIDTH = 1280
+HEIGHT = 720
+RECORD_OUTPUT = "input_video.mp4"
+
 # --- Shared State ---
-frame_buffer = deque(maxlen=1800)  # ~1 minute of buffer at 30fps
-mode = "LIVE"  # "LIVE" | "LOOP" | "PLAYBACK"
+frame_buffer = deque(maxlen=1800)   # ~1 minute of buffer at 30fps
+mode = "LIVE"                        # "LIVE" | "LOOP" | "PLAYBACK"
 lock = threading.Lock()
-frozen_loop = []
-playback_frames = []
+
+frozen_loop = []        # frames frozen at the moment recording started
+playback_frames = []    # translated video frames, ready after dubbing
 loop_index = 0
 playback_index = 0
+
+# --- Recording State ---
+is_recording = False
+recorded_frames = []
+recording_ready = False  # True once a recording has been saved and is ready to dub
+dubbing_ready = False    # True once dubbing has finished and playback is available
+
 
 def load_video(path):
     """Loads a video file and returns a list of RGB frames"""
@@ -25,25 +44,42 @@ def load_video(path):
         if not ret:
             break
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_rgb = cv2.resize(frame_rgb, (1280, 720))
+        frame_rgb = cv2.resize(frame_rgb, (WIDTH, HEIGHT))
         frames.append(frame_rgb)
     cap.release()
-    print(f"Video loaded: {len(frames)} frames = {len(frames)//30}s")
+    print(f"Video loaded: {len(frames)} frames = {len(frames) // FPS}s")
     return frames
 
+
+def save_recorded_frames(frames, path):
+    """Saves a list of RGB frames to an MP4 file"""
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(path, fourcc, FPS, (WIDTH, HEIGHT))
+    for frame_rgb in frames:
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        out.write(frame_bgr)
+    out.release()
+    print(f"Recording saved: {path} ({len(frames) // FPS}s)")
+
+
 def capture_thread(cap):
+    """Continuously reads webcam frames into the shared buffer.
+    Also appends to recorded_frames when recording is active."""
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_rgb = cv2.resize(frame_rgb, (1280, 720))
+        frame_rgb = cv2.resize(frame_rgb, (WIDTH, HEIGHT))
         with lock:
             frame_buffer.append(frame_rgb)
+            if is_recording:
+                recorded_frames.append(frame_rgb.copy())
+
 
 def dubbing_thread(video_path, source_lang, target_lang):
-    """Runs in the background — calls ElevenLabs and switches to PLAYBACK when done"""
-    global mode, playback_frames, playback_index
+    """Runs dubbing in the background. Sets dubbing_ready when done."""
+    global playback_frames, playback_index, dubbing_ready
     output_path = "translated_output.mp4"
     try:
         dub_video(video_path, source_lang, target_lang, output_path)
@@ -51,66 +87,107 @@ def dubbing_thread(video_path, source_lang, target_lang):
         with lock:
             playback_frames = frames
             playback_index = 0
-            mode = "PLAYBACK"
-            print(">> PLAYBACK started")
+            dubbing_ready = True
+        print(">> Dubbing complete! Press 'p' to start playback.")
     except Exception as e:
         print(f"Dubbing failed: {e}")
-        with lock:
-            mode = "LIVE"
+
 
 def switch_mode():
+    """Keyboard command handler running in its own thread."""
     global mode, frozen_loop, loop_index, playback_index
-    print("Commands: Enter = LOOP/LIVE, 'p' + Enter = PLAYBACK, 'd' + Enter = start dubbing")
+    global is_recording, recorded_frames, recording_ready, dubbing_ready
+
+    print_help()
+
     while True:
         cmd = input().strip().lower()
 
         with lock:
-            if cmd == "":  # Enter alone
-                if mode == "LIVE":
-                    mode = "LOOP"
+            if cmd == "r":
+                if not is_recording:
+                    # Start recording — freeze loop as cover screen
+                    is_recording = True
+                    recorded_frames = []
                     frozen_loop = list(frame_buffer)
                     loop_index = 0
-                    print(f">> LOOP ({len(frozen_loop)//30}s)")
-                elif mode == "LOOP":
-                    mode = "LIVE"
-                    frozen_loop = []
-                    print(">> LIVE")
-
-            elif cmd == "p":
-                if playback_frames:
-                    mode = "PLAYBACK"
-                    playback_index = 0
-                    print(">> PLAYBACK")
+                    mode = "LOOP"
+                    print(f">> Recording started — camera showing loop as cover. Press 'r' to stop.")
                 else:
-                    print("No video loaded — press 'd' first")
+                    # Stop recording — return to LIVE
+                    is_recording = False
+                    frames_to_save = list(recorded_frames)
+                    recorded_frames = []
+                    mode = "LIVE"
+                    recording_ready = False  # reset until save completes
+                    dubbing_ready = False
+                    print(f">> Recording stopped ({len(frames_to_save) // FPS}s). Saving... camera back to LIVE.")
+
+                    # Save in background so we don't block
+                    def save_and_flag():
+                        global recording_ready
+                        save_recorded_frames(frames_to_save, RECORD_OUTPUT)
+                        with lock:
+                            recording_ready = True
+                        print(">> Recording ready. Press 'd' to start dubbing.")
+                    threading.Thread(target=save_and_flag, daemon=True).start()
 
             elif cmd == "d":
-                if mode == "LIVE":
-                    mode = "LOOP"
-                    frozen_loop = list(frame_buffer)
-                    loop_index = 0
-                    print(">> LOOP active, dubbing running in background...")
-                    # Start dubbing in its own thread
-                    t = threading.Thread(
-                        target=dubbing_thread,
-                        args=("input_video.mp4", "de", "en"),  # <- your values here
-                        daemon=True
-                    )
-                    t.start()
+                if not recording_ready:
+                    print("No recording available yet — press 'r' to record first.")
+                elif dubbing_ready:
+                    print("Dubbing already done — press 'p' to play, or record again with 'r'.")
                 else:
-                    print("Can only start from LIVE mode")
+                    source = input("  Source language (e.g. de, en, es, fr): ").strip().lower()
+                    target = input("  Target language (e.g. en, de, es, fr): ").strip().lower()
+                    if not source or not target:
+                        print("Invalid input, dubbing cancelled.")
+                    else:
+                        print(f">> Starting dubbing in background ({source} → {target})...")
+                        threading.Thread(
+                            target=dubbing_thread,
+                            args=(RECORD_OUTPUT, source, target),
+                            daemon=True
+                        ).start()
+
+            elif cmd == "p":
+                if not dubbing_ready:
+                    if not recording_ready:
+                        print("Nothing recorded yet — press 'r' to record.")
+                    else:
+                        print("Dubbing not finished yet — wait for it to complete.")
+                else:
+                    mode = "PLAYBACK"
+                    playback_index = 0
+                    print(">> PLAYBACK started.")
+
+            elif cmd == "h":
+                print_help()
+
+            else:
+                print(f"Unknown command '{cmd}' — press 'h' for help.")
+
+
+def print_help():
+    print("\nCommands:")
+    print("  r  — start / stop recording (loop covers camera while recording; Wait at least 30 seconds)")
+    print("  d  — start dubbing (only available after recording)")
+    print("  p  — play translated video (only available after dubbing finishes)")
+    print("  h  — show this help\n")
+
 
 # --- Start ---
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
 
 t_capture = threading.Thread(target=capture_thread, args=(cap,), daemon=True)
 t_switch = threading.Thread(target=switch_mode, daemon=True)
 t_capture.start()
 t_switch.start()
 
-with pyvirtualcam.Camera(width=1280, height=720, fps=30) as vcam:
+with pyvirtualcam.Camera(width=WIDTH, height=HEIGHT, fps=FPS) as vcam:
+    print(f"Virtual camera started: {vcam.device}")
     while True:
         with lock:
             current_mode = mode
