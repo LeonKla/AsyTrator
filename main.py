@@ -3,6 +3,10 @@ import io
 import cv2
 import pyvirtualcam
 import threading
+import subprocess
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
 from collections import deque
 from dotenv import load_dotenv
 from dubbing import dub_video
@@ -16,23 +20,28 @@ load_dotenv()
 FPS = 30
 WIDTH = 1280
 HEIGHT = 720
-RECORD_OUTPUT = "input_video.mp4"
+SAMPLE_RATE = 44100     # audio sample rate
+CHANNELS = 1            # mono — fine for voice
+RECORD_VIDEO = "input_video_silent.mp4"
+RECORD_AUDIO = "input_audio.wav"
+RECORD_OUTPUT = "input_video.mp4"   # final merged file sent to dubbing
 
 # --- Shared State ---
 frame_buffer = deque(maxlen=1800)   # ~1 minute of buffer at 30fps
 mode = "LIVE"                        # "LIVE" | "LOOP" | "PLAYBACK"
 lock = threading.Lock()
 
-frozen_loop = []        # frames frozen at the moment recording started
-playback_frames = []    # translated video frames, ready after dubbing
+frozen_loop = []
+playback_frames = []
 loop_index = 0
 playback_index = 0
 
 # --- Recording State ---
 is_recording = False
 recorded_frames = []
-recording_ready = False  # True once a recording has been saved and is ready to dub
-dubbing_ready = False    # True once dubbing has finished and playback is available
+audio_chunks = []
+recording_ready = False
+dubbing_ready = False
 
 
 def load_video(path):
@@ -51,15 +60,42 @@ def load_video(path):
     return frames
 
 
-def save_recorded_frames(frames, path):
-    """Saves a list of RGB frames to an MP4 file"""
+def save_video_frames(frames, path):
+    """Saves a list of RGB frames to a silent MP4 file"""
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(path, fourcc, FPS, (WIDTH, HEIGHT))
     for frame_rgb in frames:
         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         out.write(frame_bgr)
     out.release()
-    print(f"Recording saved: {path} ({len(frames) // FPS}s)")
+    print(f"Silent video saved: {path} ({len(frames) // FPS}s)")
+
+
+def save_audio(chunks, path):
+    """Saves recorded audio chunks to a WAV file"""
+    audio_data = np.concatenate(chunks, axis=0)
+    sf.write(path, audio_data, SAMPLE_RATE)
+    print(f"Audio saved: {path}")
+
+
+def merge_audio_video(video_path, audio_path, output_path):
+    """Merges silent video and audio into a single MP4 using ffmpeg"""
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-c:v", "libx264",  # re-encode video so ElevenLabs accepts it
+        "-c:a", "aac",
+        "-shortest",        # cut to shortest stream
+        output_path
+    ], check=True, capture_output=True)
+    print(f"Merged video saved: {output_path}")
+
+
+def audio_callback(indata, frames, time, status):
+    """Called by sounddevice for each audio chunk while recording"""
+    if is_recording:
+        audio_chunks.append(indata.copy())
 
 
 def capture_thread(cap):
@@ -96,7 +132,8 @@ def dubbing_thread(video_path, source_lang, target_lang):
 def switch_mode():
     """Keyboard command handler running in its own thread."""
     global mode, frozen_loop, loop_index, playback_index
-    global is_recording, recorded_frames, recording_ready, dubbing_ready
+    global is_recording, recorded_frames, audio_chunks
+    global recording_ready, dubbing_ready
 
     print_help()
 
@@ -106,30 +143,38 @@ def switch_mode():
         with lock:
             if cmd == "r":
                 if not is_recording:
-                    # Start recording — freeze loop as cover screen
+                    # Start recording — freeze loop as cover, start audio+video capture
                     is_recording = True
                     recorded_frames = []
+                    audio_chunks = []
                     frozen_loop = list(frame_buffer)
                     loop_index = 0
                     mode = "LOOP"
-                    print(f">> Recording started — camera showing loop as cover. Press 'r' to stop.")
+                    print(">> Recording started — camera showing loop as cover. Press 'r' to stop.")
                 else:
-                    # Stop recording — return to LIVE
+                    # Stop recording — return to LIVE, save in background
                     is_recording = False
                     frames_to_save = list(recorded_frames)
+                    chunks_to_save = list(audio_chunks)
                     recorded_frames = []
+                    audio_chunks = []
                     mode = "LIVE"
-                    recording_ready = False  # reset until save completes
+                    recording_ready = False
                     dubbing_ready = False
                     print(f">> Recording stopped ({len(frames_to_save) // FPS}s). Saving... camera back to LIVE.")
 
-                    # Save in background so we don't block
                     def save_and_flag():
                         global recording_ready
-                        save_recorded_frames(frames_to_save, RECORD_OUTPUT)
+                        save_video_frames(frames_to_save, RECORD_VIDEO)
+                        if chunks_to_save:
+                            save_audio(chunks_to_save, RECORD_AUDIO)
+                            merge_audio_video(RECORD_VIDEO, RECORD_AUDIO, RECORD_OUTPUT)
+                        else:
+                            print("WARNING: No audio recorded — check your microphone.")
                         with lock:
                             recording_ready = True
                         print(">> Recording ready. Press 'd' to start dubbing.")
+
                     threading.Thread(target=save_and_flag, daemon=True).start()
 
             elif cmd == "d":
@@ -170,7 +215,7 @@ def switch_mode():
 
 def print_help():
     print("\nCommands:")
-    print("  r  — start / stop recording (loop covers camera while recording; Wait at least 30 seconds)")
+    print("  r  — start / stop recording (loop covers camera while recording)")
     print("  d  — start dubbing (only available after recording)")
     print("  p  — play translated video (only available after dubbing finishes)")
     print("  h  — show this help\n")
@@ -185,6 +230,14 @@ t_capture = threading.Thread(target=capture_thread, args=(cap,), daemon=True)
 t_switch = threading.Thread(target=switch_mode, daemon=True)
 t_capture.start()
 t_switch.start()
+
+# Start audio input stream — runs continuously, only saves chunks when is_recording is True
+audio_stream = sd.InputStream(
+    samplerate=SAMPLE_RATE,
+    channels=CHANNELS,
+    callback=audio_callback
+)
+audio_stream.start()
 
 with pyvirtualcam.Camera(width=WIDTH, height=HEIGHT, fps=FPS) as vcam:
     print(f"Virtual camera started: {vcam.device}")

@@ -33,7 +33,7 @@ def dub_video(input_path, source_lang, target_lang, output_path):
             print("  still working...")
             time.sleep(10)
         else:
-            raise Exception(f"Dubbing failed: {metadata.error_message}")
+            raise Exception(f"Dubbing failed: status={metadata.status}, details={metadata}")
 
     # Download result
     audio = client.dubbing.get_dubbed_file(dubbing_id, target_lang)
