@@ -16,19 +16,27 @@ sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace
 
 load_dotenv()
 
-# --- Constants ---
+# --- Constants ---r
 FPS = 30
 WIDTH = 1280
 HEIGHT = 720
-SAMPLE_RATE = 44100     # audio sample rate
-CHANNELS = 1            # mono — fine for voice
+SAMPLE_RATE = 44100
+CHANNELS = 1
 RECORD_VIDEO = "input_video_silent.mp4"
 RECORD_AUDIO = "input_audio.wav"
-RECORD_OUTPUT = "input_video.mp4"   # final merged file sent to dubbing
+RECORD_OUTPUT = "input_video.mp4"
+MICROPHONE_DEVICE = 1
+
+# --- Microphone device ---
+# Run this to list your devices and find the right index:
+#   python -c "import sounddevice; print(sounddevice.query_devices())"
+# Then set the index here, e.g. MICROPHONE_DEVICE = 1
+# Leave as None to use the system default (may not be your mic)
+MICROPHONE_DEVICE = None
 
 # --- Shared State ---
-frame_buffer = deque(maxlen=1800)   # ~1 minute of buffer at 30fps
-mode = "LIVE"                        # "LIVE" | "LOOP" | "PLAYBACK"
+frame_buffer = deque(maxlen=1800)
+mode = "LIVE"
 lock = threading.Lock()
 
 frozen_loop = []
@@ -41,6 +49,7 @@ is_recording = False
 recorded_frames = []
 audio_chunks = []
 recording_ready = False
+save_complete = threading.Event()  # signals when save_and_flag finishes
 dubbing_ready = False
 
 
@@ -75,7 +84,8 @@ def save_audio(chunks, path):
     """Saves recorded audio chunks to a WAV file"""
     audio_data = np.concatenate(chunks, axis=0)
     sf.write(path, audio_data, SAMPLE_RATE)
-    print(f"Audio saved: {path}")
+    duration = len(audio_data) / SAMPLE_RATE
+    print(f"Audio saved: {path} ({duration:.1f}s, {len(audio_data)} samples)")
 
 
 def merge_audio_video(video_path, audio_path, output_path):
@@ -84,9 +94,9 @@ def merge_audio_video(video_path, audio_path, output_path):
         "ffmpeg", "-y",
         "-i", video_path,
         "-i", audio_path,
-        "-c:v", "libx264",  # re-encode video so ElevenLabs accepts it
+        "-c:v", "libx264",
         "-c:a", "aac",
-        "-shortest",        # cut to shortest stream
+        "-shortest",
         output_path
     ], check=True, capture_output=True)
     print(f"Merged video saved: {output_path}")
@@ -94,13 +104,14 @@ def merge_audio_video(video_path, audio_path, output_path):
 
 def audio_callback(indata, frames, time, status):
     """Called by sounddevice for each audio chunk while recording"""
+    if status:
+        print(f"  Audio status: {status}")
     if is_recording:
         audio_chunks.append(indata.copy())
 
 
 def capture_thread(cap):
-    """Continuously reads webcam frames into the shared buffer.
-    Also appends to recorded_frames when recording is active."""
+    """Continuously reads webcam frames into the shared buffer"""
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -143,16 +154,17 @@ def switch_mode():
         with lock:
             if cmd == "r":
                 if not is_recording:
-                    # Start recording — freeze loop as cover, start audio+video capture
+                    # Start recording
                     is_recording = True
                     recorded_frames = []
                     audio_chunks = []
                     frozen_loop = list(frame_buffer)
                     loop_index = 0
                     mode = "LOOP"
+                    save_complete.clear()
                     print(">> Recording started — camera showing loop as cover. Press 'r' to stop.")
                 else:
-                    # Stop recording — return to LIVE, save in background
+                    # Stop recording
                     is_recording = False
                     frames_to_save = list(recorded_frames)
                     chunks_to_save = list(audio_chunks)
@@ -161,7 +173,8 @@ def switch_mode():
                     mode = "LIVE"
                     recording_ready = False
                     dubbing_ready = False
-                    print(f">> Recording stopped ({len(frames_to_save) // FPS}s). Saving... camera back to LIVE.")
+                    print(f">> Recording stopped ({len(frames_to_save) // FPS}s, "
+                          f"{len(chunks_to_save)} audio chunks). Saving... camera back to LIVE.")
 
                     def save_and_flag():
                         global recording_ready
@@ -170,30 +183,35 @@ def switch_mode():
                             save_audio(chunks_to_save, RECORD_AUDIO)
                             merge_audio_video(RECORD_VIDEO, RECORD_AUDIO, RECORD_OUTPUT)
                         else:
-                            print("WARNING: No audio recorded — check your microphone.")
+                            print("WARNING: No audio chunks captured — check microphone device index.")
                         with lock:
                             recording_ready = True
+                        save_complete.set()
                         print(">> Recording ready. Press 'd' to start dubbing.")
 
                     threading.Thread(target=save_and_flag, daemon=True).start()
 
             elif cmd == "d":
-                if not recording_ready:
-                    print("No recording available yet — press 'r' to record first.")
-                elif dubbing_ready:
+                if dubbing_ready:
                     print("Dubbing already done — press 'p' to play, or record again with 'r'.")
-                else:
-                    source = input("  Source language (e.g. de, en, es, fr): ").strip().lower()
-                    target = input("  Target language (e.g. en, de, es, fr): ").strip().lower()
-                    if not source or not target:
-                        print("Invalid input, dubbing cancelled.")
+                elif not recording_ready:
+                    if is_recording:
+                        print("Still recording — press 'r' to stop first.")
+                    elif save_complete.is_set() is False and len(recorded_frames) == 0 and not recording_ready:
+                        # Save might still be running — wait for it
+                        print("Save still in progress, waiting...")
+                        # Release lock while waiting so other threads aren't blocked
+                        lock.release()
+                        save_complete.wait(timeout=30)
+                        lock.acquire()
+                        if not recording_ready:
+                            print("Nothing recorded yet — press 'r' to record first.")
+                        else:
+                            _start_dubbing()
                     else:
-                        print(f">> Starting dubbing in background ({source} → {target})...")
-                        threading.Thread(
-                            target=dubbing_thread,
-                            args=(RECORD_OUTPUT, source, target),
-                            daemon=True
-                        ).start()
+                        print("Nothing recorded yet — press 'r' to record first.")
+                else:
+                    _start_dubbing()
 
             elif cmd == "p":
                 if not dubbing_ready:
@@ -211,6 +229,24 @@ def switch_mode():
 
             else:
                 print(f"Unknown command '{cmd}' — press 'h' for help.")
+
+
+def _start_dubbing():
+    """Prompts for languages and launches dubbing thread. Called from switch_mode with lock held."""
+    # Release lock during input() so other threads aren't blocked
+    lock.release()
+    source = input("  Source language (e.g. de, en, es, fr): ").strip().lower()
+    target = input("  Target language (e.g. en, de, es, fr): ").strip().lower()
+    lock.acquire()
+    if not source or not target:
+        print("Invalid input, dubbing cancelled.")
+    else:
+        print(f">> Starting dubbing in background ({source} → {target})...")
+        threading.Thread(
+            target=dubbing_thread,
+            args=(RECORD_OUTPUT, source, target),
+            daemon=True
+        ).start()
 
 
 def print_help():
@@ -231,10 +267,11 @@ t_switch = threading.Thread(target=switch_mode, daemon=True)
 t_capture.start()
 t_switch.start()
 
-# Start audio input stream — runs continuously, only saves chunks when is_recording is True
+
 audio_stream = sd.InputStream(
     samplerate=SAMPLE_RATE,
     channels=CHANNELS,
+    device=MICROPHONE_DEVICE,
     callback=audio_callback
 )
 audio_stream.start()

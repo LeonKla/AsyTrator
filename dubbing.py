@@ -4,6 +4,9 @@ from elevenlabs import ElevenLabs
 
 client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
+# Statuses that mean "still working, keep polling"
+IN_PROGRESS_STATUSES = {"dubbing", "preparing"}
+
 def dub_video(input_path, source_lang, target_lang, output_path):
     """
     Sends a local video to ElevenLabs dubbing API and saves the result.
@@ -29,11 +32,11 @@ def dub_video(input_path, source_lang, target_lang, output_path):
         if metadata.status == "dubbed":
             print("Done!")
             break
-        elif metadata.status == "dubbing":
-            print("  still working...")
+        elif metadata.status in IN_PROGRESS_STATUSES:
+            print(f"  status: {metadata.status}...")
             time.sleep(10)
         else:
-            raise Exception(f"Dubbing failed: status={metadata.status}, details={metadata}")
+            raise Exception(f"Dubbing failed: status='{metadata.status}', response={metadata}")
 
     # Download result
     audio = client.dubbing.get_dubbed_file(dubbing_id, target_lang)
