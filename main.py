@@ -9,14 +9,14 @@ import sounddevice as sd
 import soundfile as sf
 from collections import deque
 from dotenv import load_dotenv
-from dubbing import dub_video
+from dubbing_ElevenLabs import dub_video
 
 # Fix for Python 3.14 + Windows terminal unicode bug
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
 
 load_dotenv()
 
-# --- Constants ---r
+# --- Constants ---
 FPS = 30
 WIDTH = 1280
 HEIGHT = 720
@@ -25,14 +25,13 @@ CHANNELS = 1
 RECORD_VIDEO = "input_video_silent.mp4"
 RECORD_AUDIO = "input_audio.wav"
 RECORD_OUTPUT = "input_video.mp4"
-MICROPHONE_DEVICE = 1
 
 # --- Microphone device ---
 # Run this to list your devices and find the right index:
 #   python -c "import sounddevice; print(sounddevice.query_devices())"
 # Then set the index here, e.g. MICROPHONE_DEVICE = 1
-# Leave as None to use the system default (may not be your mic)
-MICROPHONE_DEVICE = None
+# Leave as None to use the system default
+MICROPHONE_DEVICE = 1
 
 # --- Shared State ---
 frame_buffer = deque(maxlen=1800)

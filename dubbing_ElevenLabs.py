@@ -1,5 +1,6 @@
 import os
 import time
+import requests
 from elevenlabs import ElevenLabs
 
 client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
@@ -38,10 +39,20 @@ def dub_video(input_path, source_lang, target_lang, output_path):
         else:
             raise Exception(f"Dubbing failed: status='{metadata.status}', response={metadata}")
 
-    # Download result
-    audio = client.dubbing.get_dubbed_file(dubbing_id, target_lang)
+    # Download result via direct HTTP request to ElevenLabs REST API
+    # The SDK's get_dubbed_file / download_video methods have inconsistent naming across versions,
+    # so we use the REST endpoint directly to avoid SDK version issues.
+    print("Downloading dubbed video...")
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    url = f"https://api.elevenlabs.io/v1/dubbing/{dubbing_id}/audio/{target_lang}"
+    headers = {"xi-api-key": api_key}
+    dl_response = requests.get(url, headers=headers, stream=True)
+
+    if dl_response.status_code != 200:
+        raise Exception(f"Download failed: {dl_response.status_code} {dl_response.text}")
+
     with open(output_path, "wb") as f:
-        for chunk in audio:
+        for chunk in dl_response.iter_content(chunk_size=8192):
             f.write(chunk)
 
     print(f"Saved: {output_path}")
