@@ -1,3 +1,6 @@
+import os
+import warnings
+warnings.filterwarnings("ignore")
 import sys
 import io
 import cv2
@@ -22,15 +25,14 @@ WIDTH = 1280
 HEIGHT = 720
 SAMPLE_RATE = 44100
 CHANNELS = 1
-RECORD_VIDEO = "input_video_silent.mp4"
-RECORD_AUDIO = "input_audio.wav"
-RECORD_OUTPUT = "input_video.mp4"
+MEDIA_DIR = "Media"
+RECORD_VIDEO = os.path.join(MEDIA_DIR, "input_video_silent.mp4")
+RECORD_AUDIO = os.path.join(MEDIA_DIR, "input_audio.wav")
+RECORD_OUTPUT = os.path.join(MEDIA_DIR, "input_video.mp4")
 
 # --- Microphone device ---
 # Run this to list your devices and find the right index:
 #   python -c "import sounddevice; print(sounddevice.query_devices())"
-# Then set the index here, e.g. MICROPHONE_DEVICE = 1
-# Leave as None to use the system default
 MICROPHONE_DEVICE = 1
 
 # --- Shared State ---
@@ -48,7 +50,6 @@ is_recording = False
 recorded_frames = []
 audio_chunks = []
 recording_ready = False
-save_complete = threading.Event()  # signals when save_and_flag finishes
 dubbing_ready = False
 
 
@@ -126,7 +127,7 @@ def capture_thread(cap):
 def dubbing_thread(video_path, source_lang, target_lang):
     """Runs dubbing in the background. Sets dubbing_ready when done."""
     global playback_frames, playback_index, dubbing_ready
-    output_path = "translated_output.mp4"
+    output_path = os.path.join(MEDIA_DIR, "translated_output.mp4")
     try:
         dub_video(video_path, source_lang, target_lang, output_path)
         frames = load_video(output_path)
@@ -153,17 +154,17 @@ def switch_mode():
         with lock:
             if cmd == "r":
                 if not is_recording:
-                    # Start recording
+                    # Start recording — freeze loop as cover screen
                     is_recording = True
                     recorded_frames = []
                     audio_chunks = []
                     frozen_loop = list(frame_buffer)
                     loop_index = 0
                     mode = "LOOP"
-                    save_complete.clear()
                     print(">> Recording started — camera showing loop as cover. Press 'r' to stop.")
+
                 else:
-                    # Stop recording
+                    # Stop recording — collect data then save synchronously
                     is_recording = False
                     frames_to_save = list(recorded_frames)
                     chunks_to_save = list(audio_chunks)
@@ -173,42 +174,32 @@ def switch_mode():
                     recording_ready = False
                     dubbing_ready = False
                     print(f">> Recording stopped ({len(frames_to_save) // FPS}s, "
-                          f"{len(chunks_to_save)} audio chunks). Saving... camera back to LIVE.")
+                          f"{len(chunks_to_save)} audio chunks). Camera back to LIVE.")
+                    print("   Please wait — saving and merging files...")
 
-                    def save_and_flag():
-                        global recording_ready
+                    # Release the lock while saving so the camera loop keeps running
+                    lock.release()
+                    try:
                         save_video_frames(frames_to_save, RECORD_VIDEO)
                         if chunks_to_save:
                             save_audio(chunks_to_save, RECORD_AUDIO)
                             merge_audio_video(RECORD_VIDEO, RECORD_AUDIO, RECORD_OUTPUT)
                         else:
                             print("WARNING: No audio chunks captured — check microphone device index.")
-                        with lock:
-                            recording_ready = True
-                        save_complete.set()
-                        print(">> Recording ready. Press 'd' to start dubbing.")
+                    finally:
+                        lock.acquire()
 
-                    threading.Thread(target=save_and_flag, daemon=True).start()
+                    recording_ready = True
+                    print(">> input_video.mp4 is ready. You can open it now, or press 'd' to start dubbing.")
 
             elif cmd == "d":
-                if dubbing_ready:
-                    print("Dubbing already done — press 'p' to play, or record again with 'r'.")
-                elif not recording_ready:
+                if not recording_ready:
                     if is_recording:
                         print("Still recording — press 'r' to stop first.")
-                    elif save_complete.is_set() is False and len(recorded_frames) == 0 and not recording_ready:
-                        # Save might still be running — wait for it
-                        print("Save still in progress, waiting...")
-                        # Release lock while waiting so other threads aren't blocked
-                        lock.release()
-                        save_complete.wait(timeout=30)
-                        lock.acquire()
-                        if not recording_ready:
-                            print("Nothing recorded yet — press 'r' to record first.")
-                        else:
-                            _start_dubbing()
                     else:
                         print("Nothing recorded yet — press 'r' to record first.")
+                elif dubbing_ready:
+                    print("Dubbing already done — press 'p' to play, or record again with 'r'.")
                 else:
                     _start_dubbing()
 
@@ -255,6 +246,8 @@ def print_help():
     print("  p  — play translated video (only available after dubbing finishes)")
     print("  h  — show this help\n")
 
+# Makes sure the Media folder exists
+os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # --- Start ---
 cap = cv2.VideoCapture(0)
@@ -265,7 +258,6 @@ t_capture = threading.Thread(target=capture_thread, args=(cap,), daemon=True)
 t_switch = threading.Thread(target=switch_mode, daemon=True)
 t_capture.start()
 t_switch.start()
-
 
 audio_stream = sd.InputStream(
     samplerate=SAMPLE_RATE,
