@@ -1,0 +1,9 @@
+PyQt6
+opencv-python
+pyvirtualcam
+numpy
+sounddevice
+soundfile
+python-dotenv
+elevenlabs
+requests

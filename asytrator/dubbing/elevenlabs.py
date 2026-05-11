@@ -1,3 +1,4 @@
+"""ElevenLabs dubbing provider — uploads a video, polls until done, downloads."""
 import os
 import time
 import requests
@@ -7,6 +8,7 @@ client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
 # Statuses that mean "still working, keep polling"
 IN_PROGRESS_STATUSES = {"dubbing", "preparing"}
+
 
 def dub_video(input_path, source_lang, target_lang, output_path):
     """
@@ -26,7 +28,6 @@ def dub_video(input_path, source_lang, target_lang, output_path):
     dubbing_id = response.dubbing_id
     print(f"Dubbing started, ID: {dubbing_id}")
 
-    # Poll until finished
     print("Waiting for ElevenLabs...")
     for _ in range(120):  # max 20 minutes
         metadata = client.dubbing.get(dubbing_id)
@@ -39,9 +40,7 @@ def dub_video(input_path, source_lang, target_lang, output_path):
         else:
             raise Exception(f"Dubbing failed: status='{metadata.status}', response={metadata}")
 
-    # Download result via direct HTTP request to ElevenLabs REST API
-    # The SDK's get_dubbed_file / download_video methods have inconsistent naming across versions,
-    # so we use the REST endpoint directly to avoid SDK version issues.
+    # Download result via direct HTTP request — SDK method names vary across versions.
     print("Downloading dubbed video...")
     api_key = os.getenv("ELEVENLABS_API_KEY")
     url = f"https://api.elevenlabs.io/v1/dubbing/{dubbing_id}/audio/{target_lang}"
