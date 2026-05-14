@@ -101,7 +101,7 @@ class AppController(QObject):
 
     # --- Dubbing ---
 
-    def start_dubbing(self, source_lang, target_lang):
+    def start_dubbing(self, source_lang, target_lang, provider="elevenlabs"):
         if not self._has_recording:
             self.status_message.emit("Nothing recorded yet.")
             return
@@ -111,9 +111,12 @@ class AppController(QObject):
         self._has_dubbing = False
         self.dubbing_in_progress.emit(True)
         self.dubbing_ready.emit(False)
-        self.status_message.emit(f"Dubbing in background ({source_lang} -> {target_lang})...")
+        provider_label = "HeyGen" if provider == "heygen" else "ElevenLabs"
+        self.status_message.emit(
+            f"Dubbing via {provider_label} ({source_lang} → {target_lang}), this may take a few minutes..."
+        )
         self.dubbing.run_async(
-            config.RECORD_OUTPUT, source_lang, target_lang,
+            config.RECORD_OUTPUT, source_lang, target_lang, provider,
             on_success=self._on_dubbing_success,
             on_error=self._on_dubbing_error,
         )

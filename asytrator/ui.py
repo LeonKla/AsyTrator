@@ -5,7 +5,7 @@ AppController; the UI just calls methods on it and listens for signals.
 """
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QLineEdit, QGroupBox,
+    QPushButton, QLabel, QLineEdit, QGroupBox, QComboBox,
 )
 
 
@@ -48,6 +48,14 @@ class MainWindow(QMainWindow):
         lang_row.addWidget(QLabel("To:"))
         lang_row.addWidget(self.target_input)
         dub_layout.addLayout(lang_row)
+
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(QLabel("Provider:"))
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem("ElevenLabs (faster, no lip-sync)", "elevenlabs")
+        self.provider_combo.addItem("HeyGen (slower, with lip-sync)", "heygen")
+        provider_row.addWidget(self.provider_combo)
+        dub_layout.addLayout(provider_row)
 
         self.dub_btn = QPushButton("Start Dubbing")
         self.dub_btn.setEnabled(False)
@@ -95,7 +103,8 @@ class MainWindow(QMainWindow):
         if not source or not target:
             self._set_status("Enter both source and target language codes (e.g. de, en).")
             return
-        self.controller.start_dubbing(source, target)
+        provider = self.provider_combo.currentData()
+        self.controller.start_dubbing(source, target, provider)
 
     def closeEvent(self, event):
         self.controller.stop()
