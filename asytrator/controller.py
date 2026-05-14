@@ -40,6 +40,8 @@ class AppController(QObject):
         self._has_recording = False
         self._has_dubbing = False
         self._dubbing_running = False
+        self._recorded_frames = []
+        self._dubbed_frames = []
 
     def start(self):
         self.video.start()
@@ -71,6 +73,8 @@ class AppController(QObject):
         # Recording invalidates any prior recording/dubbing.
         self._has_recording = False
         self._has_dubbing = False
+        self._recorded_frames = []
+        self._dubbed_frames = []
         self.recording_ready.emit(False)
         self.dubbing_ready.emit(False)
         self.recording_changed.emit(True)
@@ -87,6 +91,7 @@ class AppController(QObject):
 
         # Save synchronously — frames/chunks are already captured, this is just
         # disk + ffmpeg. Could move to a thread later if it feels slow.
+        self._recorded_frames = frames
         save_video_frames(frames, config.RECORD_VIDEO)
         if chunks:
             save_audio(chunks, config.RECORD_AUDIO)

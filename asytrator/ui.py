@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QGroupBox, QComboBox,
 )
+from asytrator.preview import PreviewDialog
 
 
 class MainWindow(QMainWindow):
@@ -63,18 +64,30 @@ class MainWindow(QMainWindow):
         dub_layout.addWidget(self.dub_btn)
         dub_box.setLayout(dub_layout)
 
-        # 4. Play button — sends the dubbed video to the virtual cam.
-        self.play_btn = QPushButton("▶ Play Dubbed Video")
-        self.play_btn.setMinimumHeight(40)
+        # 4. Preview + broadcast row for recording
+        self.preview_rec_btn = QPushButton("Preview Recording")
+        self.preview_rec_btn.setEnabled(False)
+        self.preview_rec_btn.clicked.connect(self._on_preview_recording)
+
+        # 5. Preview + broadcast row for dubbed video
+        preview_dub_row = QHBoxLayout()
+        self.preview_dub_btn = QPushButton("Preview Dubbed")
+        self.preview_dub_btn.setEnabled(False)
+        self.preview_dub_btn.clicked.connect(self._on_preview_dubbed)
+        self.play_btn = QPushButton("▶ Broadcast Dubbed")
+        self.play_btn.setMinimumHeight(36)
         self.play_btn.setEnabled(False)
         self.play_btn.clicked.connect(self.controller.start_playback)
+        preview_dub_row.addWidget(self.preview_dub_btn)
+        preview_dub_row.addWidget(self.play_btn)
 
         # Assemble.
         root = QVBoxLayout()
         root.addWidget(self.status_label)
         root.addWidget(self.record_btn)
+        root.addWidget(self.preview_rec_btn)
         root.addWidget(dub_box)
-        root.addWidget(self.play_btn)
+        root.addLayout(preview_dub_row)
         root.addStretch()
 
         central = QWidget()
@@ -86,7 +99,9 @@ class MainWindow(QMainWindow):
         c.status_message.connect(self._set_status)
         c.recording_changed.connect(self._on_recording_changed)
         c.recording_ready.connect(self.dub_btn.setEnabled)
+        c.recording_ready.connect(self.preview_rec_btn.setEnabled)
         c.dubbing_ready.connect(self.play_btn.setEnabled)
+        c.dubbing_ready.connect(self.preview_dub_btn.setEnabled)
         c.dubbing_in_progress.connect(lambda busy: self.dub_btn.setEnabled(not busy))
 
     # --- Slots ---
@@ -105,6 +120,16 @@ class MainWindow(QMainWindow):
             return
         provider = self.provider_combo.currentData()
         self.controller.start_dubbing(source, target, provider)
+
+    def _on_preview_recording(self):
+        frames = self.controller._recorded_frames
+        if frames:
+            PreviewDialog(frames, "Preview — Recording", parent=self).exec()
+
+    def _on_preview_dubbed(self):
+        frames = self.controller._dubbed_frames
+        if frames:
+            PreviewDialog(frames, "Preview — Dubbed Video", parent=self).exec()
 
     def closeEvent(self, event):
         self.controller.stop()
