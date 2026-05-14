@@ -9,6 +9,7 @@ worker threads back to the UI thread. Worker thread emits -> Qt queues it ->
 UI thread handles it. No manual locking needed for UI updates.
 """
 import os
+import threading
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from asytrator import config
@@ -16,7 +17,7 @@ from asytrator.capture.video import VideoCapture
 from asytrator.capture.audio import AudioCapture
 from asytrator.virtual_cam import VirtualCamOutput
 from asytrator.dubbing.manager import DubbingManager
-from asytrator.media_io import save_video_frames, save_audio, merge_audio_video
+from asytrator.media_io import save_video_frames, save_audio, merge_audio_video, load_video
 
 
 class AppController(QObject):
@@ -27,6 +28,7 @@ class AppController(QObject):
     dubbing_ready = pyqtSignal(bool)         # True = dubbed video loaded
     dubbing_in_progress = pyqtSignal(bool)
     playback_finished = pyqtSignal()
+    session_loading = pyqtSignal(bool)       # True = loading previous session
 
     def __init__(self):
         super().__init__()
@@ -139,6 +141,47 @@ class AppController(QObject):
         self._dubbing_running = False
         self.dubbing_in_progress.emit(False)
         self.status_message.emit(f"Dubbing failed: {err}")
+
+    # --- Session recovery ---
+
+    def load_previous_session(self):
+        """Load recording and/or dubbed video left on disk from a prior session."""
+        if self.video.is_recording or self._dubbing_running:
+            self.status_message.emit("Cannot load previous session while recording or dubbing.")
+            return
+        threading.Thread(target=self._load_session_worker, daemon=True).start()
+
+    def _load_session_worker(self):
+        self.session_loading.emit(True)
+        found = []
+
+        if os.path.exists(config.RECORD_OUTPUT):
+            self.status_message.emit("Loading previous recording...")
+            try:
+                frames = load_video(config.RECORD_OUTPUT)
+                self._recorded_frames = frames
+                self._has_recording = True
+                self.recording_ready.emit(True)
+                found.append(f"recording ({len(frames) // config.FPS}s)")
+            except Exception as e:
+                self.status_message.emit(f"Failed to load recording: {e}")
+
+        if os.path.exists(config.DUBBED_OUTPUT):
+            self.status_message.emit("Loading previous dubbed video...")
+            try:
+                frames = load_video(config.DUBBED_OUTPUT)
+                self._dubbed_frames = frames
+                self._has_dubbing = True
+                self.dubbing_ready.emit(True)
+                found.append(f"dubbed video ({len(frames) // config.FPS}s)")
+            except Exception as e:
+                self.status_message.emit(f"Failed to load dubbed video: {e}")
+
+        self.session_loading.emit(False)
+        if found:
+            self.status_message.emit(f"Previous session restored: {', '.join(found)}.")
+        else:
+            self.status_message.emit("No previous session found in Media/ folder.")
 
     # --- Playback ---
 

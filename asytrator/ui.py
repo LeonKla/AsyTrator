@@ -33,6 +33,10 @@ class MainWindow(QMainWindow):
         self.record_btn.setMinimumHeight(40)
         self.record_btn.clicked.connect(self.controller.toggle_recording)
 
+        # 2b. Restore button — loads any media left on disk from a prior session.
+        self.restore_btn = QPushButton("↩ Load Previous Session")
+        self.restore_btn.clicked.connect(self.controller.load_previous_session)
+
         # 3. Dubbing section — language inputs + button.
         dub_box = QGroupBox("Dubbing")
         dub_layout = QVBoxLayout()
@@ -84,6 +88,7 @@ class MainWindow(QMainWindow):
         # Assemble.
         root = QVBoxLayout()
         root.addWidget(self.status_label)
+        root.addWidget(self.restore_btn)
         root.addWidget(self.record_btn)
         root.addWidget(self.preview_rec_btn)
         root.addWidget(dub_box)
@@ -103,6 +108,10 @@ class MainWindow(QMainWindow):
         c.dubbing_ready.connect(self.play_btn.setEnabled)
         c.dubbing_ready.connect(self.preview_dub_btn.setEnabled)
         c.dubbing_in_progress.connect(lambda busy: self.dub_btn.setEnabled(not busy))
+        c.session_loading.connect(lambda loading: self.restore_btn.setEnabled(not loading))
+        c.session_loading.connect(lambda loading: self.restore_btn.setText(
+            "↩ Loading…" if loading else "↩ Load Previous Session"
+        ))
 
     # --- Slots ---
 
