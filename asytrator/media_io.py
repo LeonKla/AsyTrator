@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import soundfile as sf
 
-from asytrator.config import FPS, WIDTH, HEIGHT, SAMPLE_RATE
+from asytrator.config import FPS, WIDTH, HEIGHT, SAMPLE_RATE, CHANNELS
 
 
 def load_video(path):
@@ -44,6 +44,29 @@ def save_audio(chunks, path):
     sf.write(path, audio_data, SAMPLE_RATE)
     duration = len(audio_data) / SAMPLE_RATE
     print(f"Audio saved: {path} ({duration:.1f}s, {len(audio_data)} samples)")
+
+
+def extract_audio(path):
+    """Extract audio from a video file as a float32 numpy array.
+
+    Uses ffmpeg to decode to raw PCM so we don't need an extra audio library.
+    Returns shape (N,) for mono or (N, channels) for stereo.
+    """
+    result = subprocess.run([
+        "ffmpeg", "-y",
+        "-i", path,
+        "-f", "f32le",
+        "-acodec", "pcm_f32le",
+        "-ac", str(CHANNELS),
+        "-ar", str(SAMPLE_RATE),
+        "pipe:1",
+    ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    audio = np.frombuffer(result.stdout, dtype=np.float32)
+    if CHANNELS > 1:
+        audio = audio.reshape(-1, CHANNELS)
+    duration = len(audio) / SAMPLE_RATE
+    print(f"Audio extracted: {path} ({duration:.1f}s)")
+    return audio
 
 
 def merge_audio_video(video_path, audio_path, output_path):

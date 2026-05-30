@@ -17,7 +17,8 @@ from asytrator.capture.video import VideoCapture
 from asytrator.capture.audio import AudioCapture
 from asytrator.virtual_cam import VirtualCamOutput
 from asytrator.dubbing.manager import DubbingManager
-from asytrator.media_io import save_video_frames, save_audio, merge_audio_video, load_video
+from asytrator.audio_output import AudioPlayer, LivePassthrough
+from asytrator.media_io import save_video_frames, save_audio, merge_audio_video, load_video, extract_audio
 
 
 class AppController(QObject):
@@ -38,20 +39,26 @@ class AppController(QObject):
         self.audio = AudioCapture()
         self.vcam = VirtualCamOutput(self.video)
         self.dubbing = DubbingManager()
+        self.audio_out = AudioPlayer(device=config.AUDIO_OUTPUT_DEVICE)
+        self.passthrough = LivePassthrough()  # mic → CABLE Input during LIVE mode
 
         self._has_recording = False
         self._has_dubbing = False
         self._dubbing_running = False
         self._recorded_frames = []
         self._dubbed_frames = []
+        self._dubbed_audio = None
 
     def start(self):
         self.video.start()
         self.audio.start_stream()
         self.vcam.start()
+        self.passthrough.start()   # live mic → CABLE Input from the very first moment
         self.status_message.emit("Ready. Click 'Start Recording' to begin.")
 
     def stop(self):
+        self.passthrough.stop()
+        self.audio_out.stop()
         self.vcam.stop()
         self.audio.stop_stream()
         self.video.stop()
@@ -65,6 +72,10 @@ class AppController(QObject):
             self._start_recording()
 
     def _start_recording(self):
+        # Stop passthrough — during recording the cover loop is showing and we
+        # don't want the unprocessed live voice going into Teams.
+        self.passthrough.stop()
+
         # Freeze current buffer as the cover loop so viewers don't see the
         # camera while we're recording the real take behind it.
         cover = self.video.snapshot_buffer()
@@ -77,10 +88,11 @@ class AppController(QObject):
         self._has_dubbing = False
         self._recorded_frames = []
         self._dubbed_frames = []
+        self._dubbed_audio = None
         self.recording_ready.emit(False)
         self.dubbing_ready.emit(False)
         self.recording_changed.emit(True)
-        self.status_message.emit("Recording — cover loop showing in virtual cam.")
+        self.status_message.emit("Recording — cover loop active, mic muted in Teams.")
 
     def _stop_recording(self):
         frames = self.video.end_recording()
@@ -105,6 +117,8 @@ class AppController(QObject):
             self.status_message.emit(
                 "WARNING: No audio captured — check microphone device index."
             )
+        # Back to live — resume passthrough so Teams hears you again.
+        self.passthrough.start()
 
     # --- Dubbing ---
 
@@ -133,9 +147,18 @@ class AppController(QObject):
         self._dubbing_running = False
         self._has_dubbing = True
         self._dubbed_frames = frames
+        self._dubbed_audio = self._load_dubbed_audio()
         self.dubbing_in_progress.emit(False)
         self.dubbing_ready.emit(True)
         self.status_message.emit("Dubbing complete. Press 'Play' to send to virtual cam.")
+
+    def _load_dubbed_audio(self):
+        """Extract audio from the dubbed MP4. Returns None on failure (silent fallback)."""
+        try:
+            return extract_audio(config.DUBBED_OUTPUT)
+        except Exception as e:
+            self.status_message.emit(f"Warning: could not extract dubbed audio ({e})")
+            return None
 
     def _on_dubbing_error(self, err):
         self._dubbing_running = False
@@ -171,6 +194,7 @@ class AppController(QObject):
             try:
                 frames = load_video(config.DUBBED_OUTPUT)
                 self._dubbed_frames = frames
+                self._dubbed_audio = self._load_dubbed_audio()
                 self._has_dubbing = True
                 self.dubbing_ready.emit(True)
                 found.append(f"dubbed video ({len(frames) // config.FPS}s)")
@@ -189,5 +213,18 @@ class AppController(QObject):
         if not self._has_dubbing:
             self.status_message.emit("No dubbed video yet.")
             return
-        self.vcam.set_playback(self._dubbed_frames, on_done=self.playback_finished.emit)
-        self.status_message.emit("Playing dubbed video in virtual cam...")
+        # Stop live passthrough — dubbed audio takes over the CABLE Input channel.
+        self.passthrough.stop()
+        # Start audio first so it's already open when the first vcam frame fires.
+        if self._dubbed_audio is not None:
+            self.audio_out.play(self._dubbed_audio, config.SAMPLE_RATE)
+        self.vcam.set_playback(self._dubbed_frames, on_done=self._on_playback_done)
+        device_name = config.AUDIO_OUTPUT_DEVICE or "default output"
+        self.status_message.emit(
+            f"Playing dubbed video in virtual cam, audio → {device_name}."
+        )
+
+    def _on_playback_done(self):
+        self.audio_out.stop()
+        self.passthrough.start()   # hand CABLE Input back to live mic
+        self.playback_finished.emit()
