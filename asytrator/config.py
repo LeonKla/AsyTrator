@@ -18,4 +18,9 @@ DUBBED_OUTPUT = os.path.join(MEDIA_DIR, "translated_output.mp4")
 MICROPHONE_DEVICE = 1
 WEBCAM_DEVICE = 0
 
+# Set to the name (substring match) or index of the virtual audio cable input.
+# With VB-Audio Virtual Cable installed, "CABLE Input" works out of the box.
+# Set to None to use the system default output (will play on speakers, not Teams).
+AUDIO_OUTPUT_DEVICE = "CABLE Input"
+
 BUFFER_SECONDS = 60

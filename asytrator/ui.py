@@ -3,10 +3,12 @@
 Pure presentation: buttons, fields, status label. All logic lives in
 AppController; the UI just calls methods on it and listens for signals.
 """
+import sounddevice as sd
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QGroupBox, QComboBox,
 )
+from asytrator import config
 from asytrator.preview import PreviewDialog
 
 
@@ -73,7 +75,17 @@ class MainWindow(QMainWindow):
         self.preview_rec_btn.setEnabled(False)
         self.preview_rec_btn.clicked.connect(self._on_preview_recording)
 
-        # 5. Preview + broadcast row for dubbed video
+        # 5. Audio output device selector.
+        audio_out_box = QGroupBox("Audio Output (for Teams microphone)")
+        audio_out_layout = QHBoxLayout()
+        audio_out_layout.addWidget(QLabel("Device:"))
+        self.audio_out_combo = QComboBox()
+        self._populate_audio_output_devices()
+        self.audio_out_combo.currentIndexChanged.connect(self._on_audio_out_changed)
+        audio_out_layout.addWidget(self.audio_out_combo)
+        audio_out_box.setLayout(audio_out_layout)
+
+        # 6. Preview + broadcast row for dubbed video
         preview_dub_row = QHBoxLayout()
         self.preview_dub_btn = QPushButton("Preview Dubbed")
         self.preview_dub_btn.setEnabled(False)
@@ -92,6 +104,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.record_btn)
         root.addWidget(self.preview_rec_btn)
         root.addWidget(dub_box)
+        root.addWidget(audio_out_box)
         root.addLayout(preview_dub_row)
         root.addStretch()
 
@@ -139,6 +152,32 @@ class MainWindow(QMainWindow):
         frames = self.controller._dubbed_frames
         if frames:
             PreviewDialog(frames, "Preview — Dubbed Video", parent=self).exec()
+
+    def _populate_audio_output_devices(self):
+        """Fill the combo with output-capable devices, pre-selecting the configured one."""
+        self.audio_out_combo.blockSignals(True)
+        self.audio_out_combo.clear()
+        self.audio_out_combo.addItem("System Default", None)
+        configured = (config.AUDIO_OUTPUT_DEVICE or "").lower()
+        best_match = 0
+        try:
+            for i, dev in enumerate(sd.query_devices()):
+                if dev["max_output_channels"] > 0:
+                    label = f"{dev['name']} [{i}]"
+                    self.audio_out_combo.addItem(label, i)
+                    if configured and configured in dev["name"].lower():
+                        best_match = self.audio_out_combo.count() - 1
+        except Exception:
+            pass
+        self.audio_out_combo.setCurrentIndex(best_match)
+        self.audio_out_combo.blockSignals(False)
+
+    def _on_audio_out_changed(self, index):
+        device_index = self.audio_out_combo.itemData(index)
+        config.AUDIO_OUTPUT_DEVICE = device_index
+        self.controller.audio_out._device = device_index
+        # Hot-swap the live passthrough to the newly selected device.
+        self.controller.passthrough.update_output_device(device_index)
 
     def closeEvent(self, event):
         self.controller.stop()
